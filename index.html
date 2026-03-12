@@ -1903,7 +1903,13 @@
 const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbyaLsGQaYcdackZ1udj0fD0mEe5Zp1oLQH1AyMLUMS5GaMlrRRhQjk_jJtLeeYUBENo/exec";
 // Dynamic URL: checks localStorage first (set via Settings page), then falls back to constant above
 function getSheetUrl() {
-  return localStorage.getItem('ict_sheets_url') || GOOGLE_SHEET_URL;
+  const saved = localStorage.getItem('ict_sheets_url');
+  // Bootstrap: if nothing saved yet, persist the default URL so the card state is consistent
+  if (!saved) {
+    localStorage.setItem('ict_sheets_url', GOOGLE_SHEET_URL);
+    return GOOGLE_SHEET_URL;
+  }
+  return saved;
 }
 // Instructions to set up:
 // 1. Go to script.google.com
@@ -3279,31 +3285,14 @@ function showSubmitModal() {
 }
 
 function submitExam() {
+  if (window._submitting) return;
+  window._submitting = true;
+
   document.getElementById('submit-modal').style.display = 'none';
   clearInterval(examState.timerInterval);
   examState.submitted = true;
 
-  // ── Show a "submitting" overlay immediately so screen never goes blank ──
-  document.getElementById('result-full-body').innerHTML =
-    `<div style="text-align:center;padding:80px 20px 60px;">
-      <div style="font-size:3rem;margin-bottom:20px;animation:float 2s ease infinite;">📊</div>
-      <div style="font-weight:900;font-size:1.2rem;color:#1a237e;margin-bottom:8px;">Submitting your exam…</div>
-      <div style="color:#9fa8da;font-size:.88rem;font-weight:700;">Calculating results, please wait</div>
-      <div style="margin-top:20px;width:48px;height:48px;border:4px solid #e8eaf6;
-        border-top:4px solid #3949ab;border-radius:50%;animation:spin 1s linear infinite;
-        margin-left:auto;margin-right:auto;"></div>
-    </div>`;
-  showPage('page-result');
-
-  // ── Stop exam lock (exitFullscreen is async — give it 300ms to settle) ──
-  examWindowLock.stop();
-
-  // ── All heavy work deferred until after fullscreen animation completes ──
-  setTimeout(() => _finishSubmit(), 350);
-}
-
-function _finishSubmit() {
-  // ── SCORE CALCULATION ────────────────────────────────────────
+  // ── STEP 1: Score calculation (pure JS, zero DOM — runs in <5ms) ──
   const detail = { mcq:[], trueFalse:[], match:[], answer:[] };
   const mPerQ  = [
     examState.sections[0].marksPerQ || 1,
@@ -3317,13 +3306,8 @@ function _finishSubmit() {
     if(!q) return;
     const correct = examState.sections[0].answers[i] === q.shuffledAns;
     if(correct) s1 += mPerQ[0];
-    detail.mcq.push({
-      q: q.q||'',
-      opts: (q.shuffledOpts||[]).map(o=>o.text||o),
-      chosen: examState.sections[0].answers[i],
-      correct: q.shuffledAns,
-      isRight: correct
-    });
+    detail.mcq.push({ q:q.q||'', opts:(q.shuffledOpts||[]).map(o=>o.text||o),
+      chosen:examState.sections[0].answers[i], correct:q.shuffledAns, isRight:correct });
   });
 
   let s2=0;
@@ -3331,10 +3315,8 @@ function _finishSubmit() {
     if(!q) return;
     const correct = examState.sections[1].answers[i] === q.ans;
     if(correct) s2 += mPerQ[1];
-    detail.trueFalse.push({
-      q: q.q||'', chosen: examState.sections[1].answers[i],
-      correct: q.ans, isRight: correct
-    });
+    detail.trueFalse.push({ q:q.q||'', chosen:examState.sections[1].answers[i],
+      correct:q.ans, isRight:correct });
   });
 
   let s3=0;
@@ -3342,11 +3324,7 @@ function _finishSubmit() {
     if(!q) return;
     const correct = examState.sections[2].answers[i] === q.b;
     if(correct) s3 += mPerQ[2];
-    detail.match.push({
-      a: q.a||'', b: q.b||'',
-      chosen: examState.sections[2].answers[i],
-      isRight: correct
-    });
+    detail.match.push({ a:q.a||'', b:q.b||'', chosen:examState.sections[2].answers[i], isRight:correct });
   });
 
   let s4=0;
@@ -3354,13 +3332,8 @@ function _finishSubmit() {
     if(!q) return;
     const correct = examState.sections[3].answers[i] === q.shuffledAns;
     if(correct) s4 += mPerQ[3];
-    detail.answer.push({
-      q: q.q||'',
-      opts: (q.shuffledOpts||[]).map(o=>o.text||o),
-      chosen: examState.sections[3].answers[i],
-      correct: q.shuffledAns,
-      isRight: correct
-    });
+    detail.answer.push({ q:q.q||'', opts:(q.shuffledOpts||[]).map(o=>o.text||o),
+      chosen:examState.sections[3].answers[i], correct:q.shuffledAns, isRight:correct });
   });
 
   const total    = s1+s2+s3+s4;
@@ -3375,42 +3348,130 @@ function _finishSubmit() {
 
   const st = examState.student;
   const resultData = {
-    ...st,
-    mcq: s1, trueFalse: s2, match: s3, answer: s4,
+    ...st, mcq:s1, trueFalse:s2, match:s3, answer:s4,
     sec1:s1, sec2:s2, sec3:s3, sec4:s4,
-    total, maxMarks, pct: parseFloat(pct.toFixed(1)), grade,
+    total, maxMarks, pct:parseFloat(pct.toFixed(1)), grade,
     date: new Date().toISOString()
   };
 
-  // Save to localStorage
+  // ── STEP 2: Save to localStorage (<2ms) ──
   try {
-    const existing = JSON.parse(localStorage.getItem('ict_results')||'[]');
-    existing.push(resultData);
-    localStorage.setItem('ict_results', JSON.stringify(existing));
-  } catch(e) { console.warn('Could not save result:', e); }
+    const ex = JSON.parse(localStorage.getItem('ict_results')||'[]');
+    ex.push(resultData);
+    localStorage.setItem('ict_results', JSON.stringify(ex));
+  } catch(e){}
 
-  // Send to Google Sheets (fire-and-forget, never blocks UI)
+  // ── STEP 3: Fire-and-forget to Google Sheets (never blocks UI) ──
   try {
-    const _sheetUrl = getSheetUrl();
-    if (_sheetUrl && _sheetUrl !== 'YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE') {
-      fetch(_sheetUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        mode: 'no-cors',
-        body: JSON.stringify(resultData)
-      }).catch(() => {});
+    const _su = getSheetUrl();
+    if (_su && _su !== 'YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE') {
+      fetch(_su, { method:'POST', headers:{'Content-Type':'application/json'},
+        mode:'no-cors', body:JSON.stringify(resultData) }).catch(()=>{});
     }
-  } catch(e) {}
+  } catch(e){}
 
-  // Store for download/re-render
   window._lastResult = { resultData, detail, s1, s2, s3, s4, total, maxMarks, pct, grade, gradeColor, gradeEmoji, gradeMsg };
-  document.getElementById('result-topbar-name').textContent = st.name + ' — Std ' + st.std;
 
-  // Render result after a small pause so browser has painted the spinner
-  requestAnimationFrame(() => {
-    setTimeout(() => _renderResultPage(window._lastResult), 60);
-  });
+  // ── STEP 4: Build INSTANT result page (hero + section scores + student info only) ──
+  const scaleLabels = [0, Math.round(maxMarks*.25), Math.round(maxMarks*.5), Math.round(maxMarks*.75), maxMarks];
+  const mPQ = [ES.sections[0].marksPerQ||1, ES.sections[1].marksPerQ||1,
+               ES.sections[2].marksPerQ||1, ES.sections[3].marksPerQ||1];
+  const sD = [
+    {label:'MCQ',       icon:'📝', marks:s1, mPerQ:mPQ[0], items:detail.mcq,       color:'#3949ab'},
+    {label:'True/False',icon:'✅', marks:s2, mPerQ:mPQ[1], items:detail.trueFalse, color:'#00838f'},
+    {label:'Match',     icon:'🔗', marks:s3, mPerQ:mPQ[2], items:detail.match,      color:'#2e7d32'},
+    {label:'Full Form', icon:'💡', marks:s4, mPerQ:mPQ[3], items:detail.answer,     color:'#e65100'},
+  ];
+
+  const instantHTML =
+    '<!-- HERO -->' +
+    '<div style="background:linear-gradient(135deg,#1a237e 0%,#283593 50%,#3949ab 100%);' +
+    'border-radius:22px;padding:36px 28px;color:#fff;text-align:center;' +
+    'margin-bottom:20px;box-shadow:0 12px 40px rgba(26,35,126,.35);animation:slideInUp .3s ease;">' +
+    '<div style="display:inline-flex;align-items:center;justify-content:center;' +
+    'width:110px;height:110px;border-radius:50%;margin:0 auto 16px;' +
+    'background:' + gradeColor + '30;border:5px solid ' + gradeColor + ';font-size:3.2rem;' +
+    'animation:popIn .45s cubic-bezier(.34,1.56,.64,1) .05s both;">' + gradeEmoji + '</div>' +
+    '<div style="font-size:2.8rem;font-weight:900;letter-spacing:-1px;margin-bottom:4px;">' +
+    total + '<span style="font-size:1.4rem;font-weight:700;opacity:.7;"> / ' + maxMarks + '</span></div>' +
+    '<div style="font-size:1.6rem;font-weight:900;color:' + gradeColor + ';' +
+    'background:rgba(255,255,255,.08);border-radius:99px;' +
+    'padding:4px 22px;display:inline-block;margin-bottom:8px;">Grade ' + grade + '</div>' +
+    '<div style="font-size:1.1rem;color:#c5cae9;font-weight:700;margin-bottom:4px;">' + gradeMsg + '</div>' +
+    '<div style="font-size:.88rem;color:#9fa8da;">' + pct.toFixed(1) + '% · ' + st.name + ' · Std ' + st.std + '-' + st.div + '</div>' +
+    '<div style="margin:18px auto 0;max-width:360px;">' +
+    '<div style="height:10px;background:rgba(255,255,255,.15);border-radius:99px;overflow:hidden;">' +
+    '<div style="height:100%;width:' + Math.min(pct,100) + '%;background:' + gradeColor + ';border-radius:99px;transition:width 1.2s ease;"></div></div>' +
+    '<div style="display:flex;justify-content:space-between;font-size:.72rem;color:#9fa8da;font-weight:700;margin-top:5px;">' +
+    scaleLabels.map(function(v){return '<span>'+v+'</span>';}).join('') + '</div></div>' +
+    '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:22px;">' +
+    '<button onclick="_downloadResult(\'pdf\')" style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,255,255,.4);background:rgba(255,255,255,.18);color:#fff;font-family:inherit;font-weight:900;font-size:.9rem;cursor:pointer;">📕 PDF</button>' +
+    '<button onclick="_downloadResult(\'doc\')" style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;font-family:inherit;font-weight:900;font-size:.9rem;cursor:pointer;">📝 DOC</button>' +
+    '<button onclick="showPage(\'page-register\');resetExam()" style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,111,0,.5);background:rgba(255,111,0,.2);color:#ffcc80;font-family:inherit;font-weight:900;font-size:.9rem;cursor:pointer;">🔄 New Exam</button>' +
+    '</div></div>' +
+
+    '<!-- SECTION CARDS -->' +
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">' +
+    sD.map(function(sd,si){
+      var smx=sd.items.length*sd.mPerQ, sp=smx>0?Math.round((sd.marks/smx)*100):0;
+      var cc=sd.mPerQ>0?Math.round(sd.marks/sd.mPerQ):0;
+      return '<div style="background:#fff;border-radius:16px;padding:16px 10px;text-align:center;' +
+        'border:2px solid '+sd.color+'22;box-shadow:0 3px 12px rgba(0,0,0,.07);' +
+        'animation:slideInUp .3s ease both;animation-delay:'+(si*.06)+'s;">' +
+        '<div>'+_donutSvg(sp,sd.color,80)+'</div>' +
+        '<div style="font-size:1.5rem;font-weight:900;color:'+sd.color+';margin-top:4px;">' +
+        sd.marks+'<span style="font-size:.75rem;color:var(--muted);">/'+smx+'</span></div>' +
+        '<div style="font-size:.7rem;font-weight:800;color:var(--muted);margin-top:2px;">'+sd.icon+' '+sd.label+'</div>' +
+        '<div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap;">' +
+        '<span style="font-size:.6rem;background:#e8f5e9;color:#2e7d32;border-radius:99px;padding:1px 7px;font-weight:800;">✅ '+cc+'/'+sd.items.length+'</span>' +
+        '<span style="font-size:.6rem;background:#ffebee;color:#b71c1c;border-radius:99px;padding:1px 7px;font-weight:800;">❌ '+(sd.items.length-cc)+'</span>' +
+        '</div></div>';
+    }).join('') + '</div>' +
+
+    '<!-- STUDENT INFO -->' +
+    '<div style="background:#fff;border-radius:16px;padding:18px 20px;margin-bottom:20px;' +
+    'border:2px solid #e8eaf6;box-shadow:0 2px 8px rgba(0,0,0,.05);">' +
+    '<div style="font-weight:900;font-size:1rem;color:var(--text);margin-bottom:12px;">📋 Student Details</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">' +
+    [['👤 Name',st.name],['🔢 Roll No',st.roll],['📚 Standard','Std '+st.std],
+     ['🏫 Division',st.div],['💻 Subject',st.subject||'ICT'],['📱 Mobile',st.mobile]
+    ].map(function(kv){
+      return '<div style="background:#f5f7ff;border-radius:10px;padding:10px 12px;">' +
+        '<div style="font-size:.72rem;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px;">'+kv[0]+'</div>' +
+        '<div style="font-weight:900;font-size:.92rem;">'+(kv[1]||'—')+'</div></div>';
+    }).join('') + '</div></div>' +
+
+    '<!-- LAZY ANSWER REVIEW placeholder -->' +
+    '<div id="answer-review-section">' +
+    '<div style="text-align:center;padding:28px 20px;background:#fff;border-radius:16px;' +
+    'border:2px solid #e8eaf6;margin-bottom:16px;">' +
+    '<div style="width:28px;height:28px;border:3px solid #e8eaf6;border-top:3px solid #3949ab;' +
+    'border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px;"></div>' +
+    '<div style="font-size:.84rem;font-weight:700;color:#9fa8da;">Loading answer review…</div>' +
+    '</div></div>' +
+
+    '<!-- BOTTOM ACTIONS -->' +
+    '<div style="background:#fff;border-radius:16px;padding:20px;margin-top:4px;' +
+    'border:2px solid #e8eaf6;display:flex;gap:12px;flex-wrap:wrap;justify-content:center;">' +
+    '<button onclick="_downloadResult(\'pdf\')" style="padding:11px 22px;border-radius:12px;border:none;background:linear-gradient(135deg,#b71c1c,#c62828);color:#fff;font-family:inherit;font-weight:900;font-size:.95rem;cursor:pointer;">📕 Download PDF</button>' +
+    '<button onclick="_downloadResult(\'doc\')" style="padding:11px 22px;border-radius:12px;border:none;background:linear-gradient(135deg,#1b5e20,#2e7d32);color:#fff;font-family:inherit;font-weight:900;font-size:.95rem;cursor:pointer;">📝 Download DOC</button>' +
+    '<button onclick="window.print()" style="padding:11px 22px;border-radius:12px;border:2px solid #c5cae9;background:#e8eaf6;color:var(--primary);font-family:inherit;font-weight:800;font-size:.95rem;cursor:pointer;">🖨️ Print</button>' +
+    '<button onclick="showPage(\'page-register\');resetExam()" style="padding:11px 22px;border-radius:12px;border:2px solid #ff6f00;background:#fff3e0;color:#e65100;font-family:inherit;font-weight:900;font-size:.95rem;cursor:pointer;">🔄 New Exam</button>' +
+    '</div>';
+
+  // ── STEP 5: Render the instant result screen — user sees result NOW ──
+  document.getElementById('result-topbar-name').textContent = st.name + ' — Std ' + st.std;
+  document.getElementById('result-full-body').innerHTML = instantHTML;
+  showPage('page-result');
+
+  // ── STEP 6: Stop exam lock AFTER page switch (no longer blocks painting) ──
+  examWindowLock.stop();
+  window._submitting = false;
+
+  // ── STEP 7: Lazy-load heavy answer review 400ms later (browser already showing result) ──
+  setTimeout(function(){ _renderAnswerReview(window._lastResult); }, 400);
 }
+
 
 // ── DRAW DONUT SVG ───────────────────────────────────────────
 function _donutSvg(pct, color, size) {
@@ -3428,288 +3489,142 @@ function _donutSvg(pct, color, size) {
   </svg>`;
 }
 
-// ── MAIN RESULT PAGE RENDERER ────────────────────────────────
-function _renderResultPage(R) {
-  const {resultData,detail,s1,s2,s3,s4,total,maxMarks,pct,grade,gradeColor,gradeEmoji,gradeMsg} = R;
-  const st = resultData;
-  const KEYS=['A','B','C','D'];
-  // Load settings to get marksPerQ per section
-  const ES = loadExamSettings();
+// ── ANSWER REVIEW — injected lazily into #answer-review-section ──────────────
+// Called 400ms after the instant result page is already visible to the student.
+// This is the ONLY function that renders the per-question review cards.
+function _renderAnswerReview(R) {
+  const target = document.getElementById('answer-review-section');
+  if (!target) return; // result page not visible
+  const {detail,s1,s2,s3,s4} = R;
+  const KEYS = ['A','B','C','D'];
+  const ES   = loadExamSettings();
   const mPerQ = [ES.sections[0].marksPerQ||1, ES.sections[1].marksPerQ||1,
                  ES.sections[2].marksPerQ||1, ES.sections[3].marksPerQ||1];
-  // correctCount = number of correct answers (not marks)
-  const secData=[
+  const secData = [
     {label:'MCQ',       icon:'📝', marks:s1, mPerQ:mPerQ[0],
-      correctCount: mPerQ[0]>0?Math.round(s1/mPerQ[0]):0,
-      color:'#3949ab', bg:'#e8eaf6', items:detail.mcq},
+      correctCount:mPerQ[0]>0?Math.round(s1/mPerQ[0]):0, color:'#3949ab', items:detail.mcq},
     {label:'True/False',icon:'✅', marks:s2, mPerQ:mPerQ[1],
-      correctCount: mPerQ[1]>0?Math.round(s2/mPerQ[1]):0,
-      color:'#00838f', bg:'#e0f7fa', items:detail.trueFalse},
+      correctCount:mPerQ[1]>0?Math.round(s2/mPerQ[1]):0, color:'#00838f', items:detail.trueFalse},
     {label:'Match',     icon:'🔗', marks:s3, mPerQ:mPerQ[2],
-      correctCount: mPerQ[2]>0?Math.round(s3/mPerQ[2]):0,
-      color:'#2e7d32', bg:'#e8f5e9', items:detail.match},
+      correctCount:mPerQ[2]>0?Math.round(s3/mPerQ[2]):0, color:'#2e7d32', items:detail.match},
     {label:'Full Form', icon:'💡', marks:s4, mPerQ:mPerQ[3],
-      correctCount: mPerQ[3]>0?Math.round(s4/mPerQ[3]):0,
-      color:'#e65100', bg:'#fff3e0', items:detail.answer},
+      correctCount:mPerQ[3]>0?Math.round(s4/mPerQ[3]):0, color:'#e65100', items:detail.answer},
   ];
-  // Build scale labels for score bar (0, 25%, 50%, 75%, 100% of maxMarks)
-  const scaleLabels = [0, Math.round(maxMarks*0.25), Math.round(maxMarks*0.5),
-                       Math.round(maxMarks*0.75), maxMarks];
 
-  let html = `
-<!-- HERO BANNER -->
-<div style="background:linear-gradient(135deg,#1a237e 0%,#283593 50%,#3949ab 100%);
-  border-radius:22px;padding:36px 28px;color:#fff;text-align:center;
-  margin-bottom:20px;box-shadow:0 12px 40px rgba(26,35,126,.35);
-  animation:slideInUp .4s ease;">
+  let html = `<div style="font-size:.8rem;font-weight:900;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.6px;margin-bottom:12px;">📖 Answer Review</div>`;
 
-  <!-- Grade circle -->
-  <div style="display:inline-flex;align-items:center;justify-content:center;
-    width:110px;height:110px;border-radius:50%;margin:0 auto 16px;
-    background:${gradeColor}30;border:5px solid ${gradeColor};
-    font-size:3.2rem;animation:popIn .5s cubic-bezier(.34,1.56,.64,1) .1s both;">
-    ${gradeEmoji}
-  </div>
-
-  <div style="font-size:2.8rem;font-weight:900;letter-spacing:-1px;margin-bottom:4px;">
-    ${total} <span style="font-size:1.4rem;font-weight:700;opacity:.7;">/ ${maxMarks}</span>
-  </div>
-  <div style="font-size:1.6rem;font-weight:900;color:${gradeColor};
-    background:rgba(255,255,255,.08);border-radius:99px;
-    padding:4px 22px;display:inline-block;margin-bottom:8px;">
-    Grade ${grade}
-  </div>
-  <div style="font-size:1.1rem;color:#c5cae9;font-weight:700;margin-bottom:6px;">${gradeMsg}</div>
-  <div style="font-size:.88rem;color:#9fa8da;">${pct.toFixed(1)}% · ${st.name} · Std ${st.std}-${st.div}</div>
-
-  <!-- Score bar (dynamic scale) -->
-  <div style="margin:20px auto 0;max-width:360px;">
-    <div style="height:10px;background:rgba(255,255,255,.15);border-radius:99px;overflow:hidden;">
-      <div style="height:100%;width:${Math.min(pct,100)}%;background:${gradeColor};
-        border-radius:99px;transition:width 1.2s ease;"></div>
-    </div>
-    <div style="display:flex;justify-content:space-between;font-size:.72rem;
-      color:#9fa8da;font-weight:700;margin-top:5px;">
-      ${scaleLabels.map(v=>`<span>${v}</span>`).join('')}
-    </div>
-  </div>
-
-  <!-- Action buttons -->
-  <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:24px;">
-    <button onclick="_downloadResult('pdf')"
-      style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,255,255,.4);
-        background:rgba(255,255,255,.18);color:#fff;font-family:inherit;font-weight:900;
-        font-size:.9rem;cursor:pointer;display:flex;align-items:center;gap:7px;">
-      📕 Download PDF</button>
-    <button onclick="_downloadResult('doc')"
-      style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,255,255,.3);
-        background:rgba(255,255,255,.12);color:#fff;font-family:inherit;font-weight:900;
-        font-size:.9rem;cursor:pointer;display:flex;align-items:center;gap:7px;">
-      📝 Download DOC</button>
-    <button onclick="window.print()"
-      style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,255,255,.25);
-        background:rgba(255,255,255,.08);color:#c5cae9;font-family:inherit;font-weight:800;
-        font-size:.9rem;cursor:pointer;">🖨️ Print</button>
-    <button onclick="showPage('page-register');resetExam()"
-      style="padding:10px 20px;border-radius:12px;border:2px solid rgba(255,111,0,.5);
-        background:rgba(255,111,0,.2);color:#ffcc80;font-family:inherit;font-weight:900;
-        font-size:.9rem;cursor:pointer;">🔄 New Exam</button>
-  </div>
-</div>
-
-<!-- SECTION SCORE CARDS (donut charts) -->
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
-  ${secData.map((sd,si)=>{
-    const secMaxMarks = sd.items.length * sd.mPerQ;
-    const secPct = secMaxMarks > 0 ? Math.round((sd.marks / secMaxMarks)*100) : 0;
-    return `
-  <div style="background:#fff;border-radius:16px;padding:16px 10px;text-align:center;
-    border:2px solid ${sd.color}22;box-shadow:0 3px 12px rgba(0,0,0,.07);
-    animation:slideInUp .35s ease both;animation-delay:${si*.07}s;">
-    <div>${_donutSvg(secPct, sd.color, 80)}</div>
-    <div style="font-size:1.5rem;font-weight:900;color:${sd.color};margin-top:4px;">
-      ${sd.marks}<span style="font-size:.75rem;color:var(--muted);">/${secMaxMarks}</span>
-    </div>
-    <div style="font-size:.7rem;font-weight:800;color:var(--muted);margin-top:2px;">${sd.icon} ${sd.label}</div>
-    <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap;">
-      <span style="font-size:.6rem;background:#e8f5e9;color:#2e7d32;border-radius:99px;padding:1px 7px;font-weight:800;">
-        ✅ ${sd.correctCount}/${sd.items.length}</span>
-      <span style="font-size:.6rem;background:#ffebee;color:#b71c1c;border-radius:99px;padding:1px 7px;font-weight:800;">
-        ❌ ${sd.items.length - sd.correctCount}</span>
-    </div>
-  </div>`;
-  }).join('')}
-</div>
-
-<!-- STUDENT INFO -->
-<div style="background:#fff;border-radius:16px;padding:18px 20px;margin-bottom:20px;
-  border:2px solid #e8eaf6;box-shadow:0 2px 8px rgba(0,0,0,.05);">
-  <div style="font-weight:900;font-size:1rem;color:var(--text);margin-bottom:12px;">📋 Student Details</div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
-    ${[['👤 Name',st.name],['🔢 Roll No',st.roll],['📚 Standard','Std '+st.std],
-       ['🏫 Division',st.div],['💻 Subject',st.subject||'ICT'],['📱 Mobile',st.mobile]
-      ].map(([k,v])=>`<div style="background:#f5f7ff;border-radius:10px;padding:10px 12px;">
-        <div style="font-size:.72rem;color:var(--muted);font-weight:800;text-transform:uppercase;
-          letter-spacing:.4px;margin-bottom:3px;">${k}</div>
-        <div style="font-weight:900;font-size:.95rem;">${v}</div>
-      </div>`).join('')}
-  </div>
-</div>
-
-<!-- SECTION-WISE Q&A REVIEW -->
-<div style="font-size:.8rem;font-weight:900;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.6px;margin-bottom:12px;">📖 Answer Review</div>
-
-${secData.map((sd,si)=>{
-  if(!sd.items.length) return '';
-  return `<div style="background:#fff;border-radius:16px;border:2px solid ${sd.color}22;
-    margin-bottom:16px;overflow:hidden;box-shadow:0 3px 12px rgba(0,0,0,.06);
-    animation:slideInUp .4s ease both;animation-delay:${si*.08}s;">
-
-    <!-- Section header -->
-    <div style="background:linear-gradient(90deg,${sd.color}18,transparent);
-      padding:13px 16px;border-bottom:2px solid ${sd.color}18;
-      display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <div style="width:38px;height:38px;border-radius:10px;background:${sd.color}18;
-          display:flex;align-items:center;justify-content:center;font-size:1.2rem;">
-          ${sd.icon}</div>
-        <div>
-          <div style="font-weight:900;font-size:1rem;">${sd.label}</div>
-          <div style="font-size:.75rem;color:var(--muted);font-weight:700;">
-            ${sd.correctCount} correct of ${sd.items.length} questions · ${sd.marks}/${sd.items.length * sd.mPerQ} marks
+  secData.forEach((sd,si) => {
+    if (!sd.items.length) return;
+    const smx = sd.items.length * sd.mPerQ;
+    html += `<div style="background:#fff;border-radius:16px;border:2px solid ${sd.color}22;
+      margin-bottom:16px;overflow:hidden;box-shadow:0 3px 12px rgba(0,0,0,.06);
+      animation:slideInUp .35s ease both;animation-delay:${si*.07}s;">
+      <div style="background:linear-gradient(90deg,${sd.color}18,transparent);
+        padding:13px 16px;border-bottom:2px solid ${sd.color}18;
+        display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:38px;height:38px;border-radius:10px;background:${sd.color}18;
+            display:flex;align-items:center;justify-content:center;font-size:1.2rem;">${sd.icon}</div>
+          <div>
+            <div style="font-weight:900;font-size:1rem;">${sd.label}</div>
+            <div style="font-size:.75rem;color:var(--muted);font-weight:700;">
+              ${sd.correctCount} correct of ${sd.items.length} · ${sd.marks}/${smx} marks</div>
           </div>
         </div>
+        <div style="display:flex;gap:6px;">
+          <div style="background:#e8f5e9;border-radius:8px;padding:5px 12px;font-size:.78rem;font-weight:900;color:#2e7d32;">✅ ${sd.correctCount} Right</div>
+          <div style="background:#ffebee;border-radius:8px;padding:5px 12px;font-size:.78rem;font-weight:900;color:#b71c1c;">❌ ${sd.items.length-sd.correctCount} Wrong</div>
+        </div>
       </div>
-      <div style="display:flex;gap:6px;align-items:center;">
-        <div style="background:#e8f5e9;border-radius:8px;padding:5px 12px;
-          font-size:.78rem;font-weight:900;color:#2e7d32;">✅ ${sd.correctCount} Right</div>
-        <div style="background:#ffebee;border-radius:8px;padding:5px 12px;
-          font-size:.78rem;font-weight:900;color:#b71c1c;">❌ ${sd.items.length-sd.correctCount} Wrong</div>
-      </div>
-    </div>
+      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">`;
 
-    <!-- Questions -->
-    <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
-      ${sd.items.map((item,qi)=>{
-        const isRight = item.isRight;
-        const notAns  = item.chosen===null||item.chosen===undefined;
+    sd.items.forEach((item,qi) => {
+      const isRight = item.isRight;
+      const notAns  = item.chosen===null || item.chosen===undefined;
+      const bc      = isRight?'#00c853':notAns?'#9e9e9e':'#ff1744';
+      const bg      = isRight?'#f0fdf4':notAns?'#fafafa':'#fff8f8';
 
-        if(sd.label==='True/False'){
-          const corrLabel = item.correct ? 'True' : 'False';
-          const choLabel  = item.chosen===null ? 'Not Answered' : item.chosen ? 'True' : 'False';
-          return `<div style="border:2px solid ${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};
-            border-radius:12px;overflow:hidden;">
-            <div style="padding:11px 14px;background:${isRight?'#f0fdf4':notAns?'#fafafa':'#fff8f8'};">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                <span style="width:24px;height:24px;border-radius:6px;font-size:.72rem;font-weight:900;
-                  display:flex;align-items:center;justify-content:center;
-                  background:${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};color:#fff;">
-                  ${qi+1}</span>
-                <span style="font-weight:900;font-size:.95rem;flex:1;">${item.q}</span>
-                <span style="font-size:1.2rem;">${isRight?'✅':notAns?'⬜':'❌'}</span>
-              </div>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <div style="flex:1;background:${isRight?'#e8f5e9':notAns?'#f5f5f5':'#ffebee'};
-                  border-radius:8px;padding:7px 12px;border:1.5px solid ${isRight?'#00c853':notAns?'#bbb':'#ff1744'};">
-                  <div style="font-size:.66rem;font-weight:800;color:var(--muted);margin-bottom:2px;">YOUR ANSWER</div>
-                  <div style="font-weight:900;color:${isRight?'#2e7d32':notAns?'#9e9e9e':'#b71c1c'};">
-                    ${isRight?'✅':notAns?'—':'❌'} ${choLabel}</div>
-                </div>
-                ${!isRight?`<div style="flex:1;background:#e8f5e9;border-radius:8px;
-                  padding:7px 12px;border:1.5px solid #00c853;">
-                  <div style="font-size:.66rem;font-weight:800;color:var(--muted);margin-bottom:2px;">CORRECT ANSWER</div>
-                  <div style="font-weight:900;color:#2e7d32;">✅ ${corrLabel}</div>
-                </div>`:''}
-              </div>
-            </div>
-          </div>`;
-        }
-
-        if(sd.label==='Match'){
-          return `<div style="border:2px solid ${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};
-            border-radius:12px;overflow:hidden;">
-            <div style="padding:11px 14px;background:${isRight?'#f0fdf4':notAns?'#fafafa':'#fff8f8'};
-              display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      if (sd.label === 'True/False') {
+        const corrLabel = item.correct ? 'True' : 'False';
+        const choLabel  = item.chosen===null ? 'Not Answered' : item.chosen ? 'True' : 'False';
+        html += `<div style="border:2px solid ${bc};border-radius:12px;overflow:hidden;">
+          <div style="padding:11px 14px;background:${bg};">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
               <span style="width:24px;height:24px;border-radius:6px;font-size:.72rem;font-weight:900;
-                display:flex;align-items:center;justify-content:center;flex-shrink:0;
-                background:${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};color:#fff;">${qi+1}</span>
-              <div style="flex:1;min-width:100px;">
-                <div style="font-weight:900;font-size:.92rem;">${item.a}</div>
-                <div style="font-size:.75rem;color:var(--muted);font-weight:700;margin-top:2px;">
-                  Your: <span style="color:${isRight?'#2e7d32':notAns?'#9e9e9e':'#b71c1c'};font-weight:900;">
-                    ${item.chosen||'Not answered'}</span>
-                  ${!isRight?` · Correct: <span style="color:#2e7d32;font-weight:900;">${item.b}</span>`:''}
-                </div>
+                display:flex;align-items:center;justify-content:center;background:${bc};color:#fff;">${qi+1}</span>
+              <span style="font-weight:900;font-size:.95rem;flex:1;">${item.q}</span>
+              <span style="font-size:1.2rem;">${isRight?'✅':notAns?'⬜':'❌'}</span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <div style="flex:1;background:${isRight?'#e8f5e9':notAns?'#f5f5f5':'#ffebee'};
+                border-radius:8px;padding:7px 12px;border:1.5px solid ${bc};">
+                <div style="font-size:.66rem;font-weight:800;color:var(--muted);margin-bottom:2px;">YOUR ANSWER</div>
+                <div style="font-weight:900;color:${isRight?'#2e7d32':notAns?'#9e9e9e':'#b71c1c'};">
+                  ${isRight?'✅':notAns?'—':'❌'} ${choLabel}</div>
               </div>
-              <span style="font-size:1.3rem;">${isRight?'✅':notAns?'⬜':'❌'}</span>
+              ${!isRight?`<div style="flex:1;background:#e8f5e9;border-radius:8px;
+                padding:7px 12px;border:1.5px solid #00c853;">
+                <div style="font-size:.66rem;font-weight:800;color:var(--muted);margin-bottom:2px;">CORRECT ANSWER</div>
+                <div style="font-weight:900;color:#2e7d32;">✅ ${corrLabel}</div>
+              </div>`:''}
             </div>
-          </div>`;
-        }
-
-        // MCQ / Full Form
-        const chosenIdx = item.chosen;
-        const corrIdx   = item.correct;
-        return `<div style="border:2px solid ${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};
-          border-radius:12px;overflow:hidden;">
-          <div style="padding:11px 14px;background:${isRight?'#f0fdf4':notAns?'#fafafa':'#fff8f8'};">
-            <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
-              <span style="width:24px;height:24px;border-radius:6px;font-size:.72rem;font-weight:900;
-                display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;
-                background:${isRight?'#00c853':notAns?'#9e9e9e':'#ff1744'};color:#fff;">${qi+1}</span>
-              <span style="font-weight:900;font-size:.95rem;flex:1;line-height:1.4;">${item.q}</span>
-              <span style="font-size:1.3rem;flex-shrink:0;">${isRight?'✅':notAns?'⬜':'❌'}</span>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-              ${(item.opts||[]).map((opt,oi)=>{
-                const isChosen  = chosenIdx===oi;
-                const isCorrect = corrIdx===oi;
-                let bg='#f5f7ff', border='#e8eaf6', col='var(--text)', icon='';
-                if(isCorrect){ bg='#e8f5e9'; border='#00c853'; col='#2e7d32'; icon='✅ '; }
-                if(isChosen&&!isCorrect){ bg='#ffebee'; border='#ff1744'; col='#b71c1c'; icon='❌ '; }
-                if(isChosen&&isCorrect){ icon='✅ '; }
-                return `<div style="background:${bg};border:2px solid ${border};
-                  border-radius:9px;padding:8px 10px;font-size:.84rem;
-                  font-weight:${isChosen||isCorrect?'900':'700'};color:${col};">
-                  <span style="opacity:.65;">${KEYS[oi]})</span> ${icon}${opt}
-                </div>`;
-              }).join('')}
-            </div>
-            ${notAns?`<div style="margin-top:8px;font-size:.76rem;color:#9e9e9e;font-weight:700;">
-              — Not answered · Correct: <strong>${KEYS[corrIdx]}) ${item.opts[corrIdx]||''}</strong>
-            </div>`:''}
           </div>
         </div>`;
-      }).join('')}
-    </div>
-  </div>`;
-}).join('')}
+        return;
+      }
 
-<!-- BOTTOM ACTIONS -->
-<div style="background:#fff;border-radius:16px;padding:20px;margin-top:8px;
-  border:2px solid #e8eaf6;display:flex;gap:12px;flex-wrap:wrap;justify-content:center;
-  box-shadow:0 2px 8px rgba(0,0,0,.05);">
-  <button onclick="_downloadResult('pdf')"
-    style="padding:11px 22px;border-radius:12px;border:none;
-      background:linear-gradient(135deg,#b71c1c,#c62828);color:#fff;
-      font-family:inherit;font-weight:900;font-size:.95rem;cursor:pointer;
-      box-shadow:0 4px 12px rgba(183,28,28,.3);">📕 Download PDF</button>
-  <button onclick="_downloadResult('doc')"
-    style="padding:11px 22px;border-radius:12px;border:none;
-      background:linear-gradient(135deg,#1b5e20,#2e7d32);color:#fff;
-      font-family:inherit;font-weight:900;font-size:.95rem;cursor:pointer;
-      box-shadow:0 4px 12px rgba(27,94,32,.3);">📝 Download DOC</button>
-  <button onclick="window.print()"
-    style="padding:11px 22px;border-radius:12px;border:2px solid #c5cae9;
-      background:#e8eaf6;color:var(--primary);font-family:inherit;
-      font-weight:800;font-size:.95rem;cursor:pointer;">🖨️ Print</button>
-  <button onclick="showPage('page-register');resetExam()"
-    style="padding:11px 22px;border-radius:12px;border:2px solid #ff6f00;
-      background:#fff3e0;color:#e65100;font-family:inherit;
-      font-weight:900;font-size:.95rem;cursor:pointer;">🔄 Take New Exam</button>
-</div>`;
+      if (sd.label === 'Match') {
+        html += `<div style="border:2px solid ${bc};border-radius:12px;overflow:hidden;">
+          <div style="padding:11px 14px;background:${bg};display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span style="width:24px;height:24px;border-radius:6px;font-size:.72rem;font-weight:900;
+              display:flex;align-items:center;justify-content:center;flex-shrink:0;background:${bc};color:#fff;">${qi+1}</span>
+            <div style="flex:1;min-width:100px;">
+              <div style="font-weight:900;font-size:.92rem;">${item.a}</div>
+              <div style="font-size:.75rem;color:var(--muted);font-weight:700;margin-top:2px;">
+                Your: <span style="color:${isRight?'#2e7d32':notAns?'#9e9e9e':'#b71c1c'};font-weight:900;">${item.chosen||'Not answered'}</span>
+                ${!isRight?` · Correct: <span style="color:#2e7d32;font-weight:900;">${item.b}</span>`:''}
+              </div>
+            </div>
+            <span style="font-size:1.3rem;">${isRight?'✅':notAns?'⬜':'❌'}</span>
+          </div>
+        </div>`;
+        return;
+      }
 
-  document.getElementById('result-full-body').innerHTML = html;
+      // MCQ / Full Form
+      const chosenIdx = item.chosen;
+      const corrIdx   = item.correct;
+      html += `<div style="border:2px solid ${bc};border-radius:12px;overflow:hidden;">
+        <div style="padding:11px 14px;background:${bg};">
+          <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
+            <span style="width:24px;height:24px;border-radius:6px;font-size:.72rem;font-weight:900;
+              display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;
+              background:${bc};color:#fff;">${qi+1}</span>
+            <span style="font-weight:900;font-size:.95rem;flex:1;line-height:1.4;">${item.q}</span>
+            <span style="font-size:1.3rem;flex-shrink:0;">${isRight?'✅':notAns?'⬜':'❌'}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">`;
+      (item.opts||[]).forEach((opt,oi) => {
+        const isChosen  = chosenIdx===oi;
+        const isCorrect = corrIdx===oi;
+        let obg='#f5f7ff', obr='#e8eaf6', ocol='var(--text)', icon='';
+        if(isCorrect){ obg='#e8f5e9'; obr='#00c853'; ocol='#2e7d32'; icon='✅ '; }
+        if(isChosen&&!isCorrect){ obg='#ffebee'; obr='#ff1744'; ocol='#b71c1c'; icon='❌ '; }
+        if(isChosen&&isCorrect){ icon='✅ '; }
+        html += `<div style="background:${obg};border:2px solid ${obr};border-radius:9px;
+          padding:8px 10px;font-size:.84rem;font-weight:${isChosen||isCorrect?'900':'700'};color:${ocol};">
+          <span style="opacity:.65;">${KEYS[oi]})</span> ${icon}${opt}</div>`;
+      });
+      html += `</div>${notAns?`<div style="margin-top:8px;font-size:.76rem;color:#9e9e9e;font-weight:700;">
+        — Not answered · Correct: <strong>${KEYS[corrIdx]}) ${(item.opts||[])[corrIdx]||''}</strong></div>`:''}
+        </div></div>`;
+    });
+
+    html += `</div></div>`;
+  });
+
+  target.innerHTML = html;
 }
 
 // ── DOWNLOAD RESULT (PDF/DOC) ────────────────────────────────
@@ -4521,8 +4436,8 @@ function showDashSection(sec) {
               display:flex;align-items:center;gap:5px;">
               <span>🟢</span> Connected
             </div>`
-          : `<div style="background:#fff8e1;border:2px solid #ff8f00;border-radius:99px;
-              padding:4px 14px;font-size:.74rem;font-weight:900;color:#e65100;
+          : `<div style="background:#ffebee;border:2px solid #ff1744;border-radius:99px;
+              padding:4px 14px;font-size:.74rem;font-weight:900;color:#b71c1c;
               display:flex;align-items:center;gap:5px;">
               <span>🔴</span> Not Connected
             </div>`;
@@ -4531,14 +4446,14 @@ function showDashSection(sec) {
 
     <div id="sheets-card-body" style="padding:18px 20px;">
     ${(()=>{
-      const u = localStorage.getItem('ict_sheets_url')||'';
+      const u = getSheetUrl();   // always returns a URL (never empty)
       const verified = localStorage.getItem('ict_sheets_verified')==='1';
 
       /* ══════════════════════════════════════════════
          STATE A: CONNECTED — show green panel only
          No form, no buttons — just status + disconnect
          ══════════════════════════════════════════════ */
-      if (verified && u && u !== 'YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE') {
+      if (verified) {
         return `
         <!-- ✅ CONNECTED STATE -->
         <div style="background:linear-gradient(135deg,#e8f5e9,#f1f8e9);border:2px solid #a5d6a7;
@@ -6283,9 +6198,14 @@ function saveSheetsUrl() {
   if (url && !url.startsWith('https://script.google.com')) {
     showToast('⚠️ URL must start with https://script.google.com','#ff6f00'); return false;
   }
-  const prevUrl = localStorage.getItem('ict_sheets_url') || '';
-  localStorage.setItem('ict_sheets_url', url || '');
-  if (url !== prevUrl) localStorage.removeItem('ict_sheets_verified');
+  const prevUrl = getSheetUrl();  // use getSheetUrl() not raw localStorage
+  if (url) {
+    localStorage.setItem('ict_sheets_url', url);
+    // Only wipe verified if user actually changed the URL to something different
+    if (url.trim() !== prevUrl.trim()) {
+      localStorage.removeItem('ict_sheets_verified');
+    }
+  }
   return true;
 }
 
@@ -6311,15 +6231,12 @@ async function saveAndTestSheets() {
 }
 
 async function testSheetsConnection() {
-  // Read URL from input if present — save directly to avoid clearing verified flag via saveSheetsUrl()
+  // If the setup form is visible and user typed a URL, save it first
   const inputEl = document.getElementById('set-sheets-url');
   const inputVal = inputEl?.value?.trim();
-  if (inputVal) {
-    const stored = localStorage.getItem('ict_sheets_url') || '';
-    if (inputVal !== stored) {
-      localStorage.setItem('ict_sheets_url', inputVal);
-      localStorage.removeItem('ict_sheets_verified');
-    }
+  if (inputVal && inputVal !== getSheetUrl()) {
+    localStorage.setItem('ict_sheets_url', inputVal);
+    localStorage.removeItem('ict_sheets_verified');
   }
 
   const url = getSheetUrl();
